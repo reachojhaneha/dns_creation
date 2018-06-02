@@ -1,0 +1,210 @@
+#!/usr/bin/env python
+
+import sys
+import dns
+import dns.name
+import dns.query
+import timeit
+import time
+
+global SERVER
+SIZE = 0
+
+# List of servers which are already checked. 
+# So that we do not resolve a server multiple times.
+server_list = []
+
+# Variable to check DNSSEC
+DNSSEC_SUPPORT = True
+
+# Function to validate server for DNSSEC
+def validate_dnssec(next_server, name, current_server):
+	global DNSSEC_SUPPORT
+
+	# Query Current Server for Delegation Signer 
+	ds_response = dns.query.tcp(dns.message.make_query(name, dns.rdatatype.DS, want_dnssec=True), current_server)
+
+	# Query Next Server for Public DNSKEY 
+	nxt_srv_response = dns.query.tcp(dns.message.make_query(name, dns.rdatatype.DNSKEY, want_dnssec=True), next_server)
+
+	if len(nxt_srv_response.answer) == 0 or len(ds_response.answer) == 0:
+		DNSSEC_SUPPORT = False
+		return False
+
+	ks_key = None
+	for item in nxt_srv_response.answer[0].items:
+		if item.flags==257:
+			ks_key = item
+
+	if ks_key == None:
+		print 'Key-signing key not Found'
+		DNSSEC_SUPPORT = False
+		return False
+	
+	ds_items = ds_response.answer[0].items
+	if len(ds_items) == 0:
+		DNSSEC_SUPPORT = False
+		return False
+
+	# Check digest type
+	if ds_items[0].digest_type==1:
+		digest_type = 'SHA1'
+	elif ds_items[0].digest_type==2:
+		digest_type = 'SHA256'
+
+	# Make DS for domain
+	# Verify DS
+	if dns.dnssec.make_ds(name, ks_key, digest_type).digest != ds_items[0].digest:
+		print "DNSSec verification failed."
+		DNSSEC_SUPPORT = False
+		return False
+
+	# Validate DNSSEC Support
+	try:
+		dns.dnssec.validate(nxt_srv_response.answer[0], nxt_srv_response.answer[1], {name: nxt_srv_response.answer[0]})
+	except:
+		print "DNSSEC Validation Failed for ", name
+		DNSSEC_SUPPORT = False
+		return False
+
+	DNSSEC_SUPPORT = True
+	return True
+
+#Function to resolve the DNS Server recursively
+def resolve(name, rdtype, where):
+	global SIZE
+	response = [""]
+	try:
+		response = dns.query.udp(dns.message.make_query(name, rdtype), 
+                                where, timeout=2)
+	except dns.exception.DNSException as err:
+		# In case of timeout return None, to move to next server
+		if isinstance(err, dns.exception.Timeout):
+			return None
+
+	ret = response.rcode()
+	if ret != dns.rcode.NOERROR:
+		if ret != dns.rcode.NXDOMAIN:
+			raise Exception('Error %s' % dns.rcode.to_text(ret))
+		else:
+			raise Exception('domain %s does not exist.' % name)
+
+	# Return in the case when Answer is found
+	if response.answer:
+		SIZE += sys.getsizeof(response)
+		return response.answer
+	
+	# If Answer is not found then first we check Additional Section
+	# for IP address of the next hop.
+	if response.additional:
+		for additional_section in response.additional:
+			add_server = additional_section.to_text().split()
+			if add_server[3] == 'A':
+				# Validate DNSSEC
+				validate_dnssec(add_server[4], response.authority[0].name, where)
+				where = add_server[4]
+				# Add server to the server_list to not resolve multiple times
+				server_list.append(add_server[0])
+				res_ip = resolve(name, rdtype, where)
+				# Return in the case when resolved IP is not None
+ 
+				if res_ip is not None:
+					SIZE += sys.getsizeof(response)
+					return res_ip
+	
+	# If we are not able to resolve the DNS from the additional section as well
+	#  then we parse the Authority Section. 
+	# First we resolve the names of servers in the Authority Section and then
+	#  use the IP to resolve the original name
+	if response.authority:
+		for authority in response.authority[0]:
+			if authority.rdtype == 2:
+				auth_name = authority.to_text()
+				# Do not resolve if authority server is already checked
+				if auth_name not in server_list:
+					server_list.append(auth_name)
+					server = resolve_loop(dns.name.from_text(auth_name), dns.rdatatype.A)
+					servers = server[0].to_text().split()
+					# Validate DNSSEC
+					validate_dnssec(servers[4], response.authority[0].name, where)
+					res_ip = resolve(name, rdtype, servers[4])
+					# Return in the case when resolved IP is not None
+					if res_ip is not None:
+						SIZE += sys.getsizeof(response)
+						return res_ip
+	return None
+
+# Function to loop over all root-servers and resolve the DNS
+def resolve_loop(domain, datatype):
+	# List of Root Servers
+	root_servers = [
+		'198.41.0.4',
+		'199.9.14.201',
+		'192.33.4.12',
+		'199.7.91.13',
+		'192.203.230.10',
+		'192.5.5.241',
+		'192.112.36.4',
+		'198.97.190.53',
+		'192.36.148.17',
+		'192.58.128.30',
+		'193.0.14.129',
+		'199.7.83.42',
+		'202.12.27.33']
+	for where in root_servers:
+		try:
+			res_ip = resolve(domain, datatype, where)
+		except Exception as exp:
+			print "Exception: ", exp
+			print
+			return None
+
+		if res_ip:
+			global SERVER
+			SERVER = where
+			return res_ip
+	return None
+
+# START SCRIPT
+argc = len(sys.argv)
+if argc < 2:
+	print "Usage: ./mydig <domain> [<rdtype>]"
+	sys.exit()
+
+if argc == 2:
+	domain = sys.argv[1]
+	rdtype = 'A'
+else:
+	domain = sys.argv[1]
+	rdtype = sys.argv[2]
+	if rdtype != 'A' and rdtype != 'MX' and rdtype != 'NS':
+		print "rdtype can only be A, MX or NS"
+		sys.exit()
+
+# Set datatype
+datatype = dns.rdatatype.A if rdtype == 'A' else dns.rdatatype.MX if rdtype == 'MX' else dns.rdatatype.NS
+
+name = dns.name.from_text(domain)
+print "QUESTION SECTION:"
+print domain.ljust(20), "IN".rjust(8), rdtype.rjust(3)
+print
+start = timeit.default_timer()
+nameserver = resolve_loop(name, datatype)
+if nameserver:
+	if not DNSSEC_SUPPORT:
+		print 'DNSSec not supported'
+		sys.exit()
+
+	print 'The domain supports DNSSec'
+	print "ANSWER SECTION:"
+	result = nameserver[0].to_text().split()
+	print result[0].ljust(20), (result[1]+" "+result[2]).rjust(8), result[3].rjust(3), result[4]
+	print
+	print ";; Query Time: ", int((timeit.default_timer() - start) *1000), " ms"
+	print ";; Root Server: ", SERVER
+	print ";; MSG SIZE recv: ", SIZE
+	print ";; When: ", time.strftime("%c")
+else:
+	print "ERROR:"
+	print name, "not able to reolve for", rdtype, "rdata type.", \
+		"Try some other rdata type."

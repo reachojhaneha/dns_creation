@@ -1,0 +1,39 @@
+neha:Ojha-Neha-Hw1$ ./mydig Google.com
+QUESTION SECTION:
+Google.com                 IN   A
+
+ANSWER SECTION:
+Google.com.            300 IN   A 172.217.3.110
+
+;; Query Time:  163  ms
+;; Root Server:  198.41.0.4
+;; MSG SIZE recv:  192
+;; When:  Sun Feb 18 13:30:13 2018
+
+
+neha:Ojha-Neha-Hw1$ ./mydig Google.com MX
+QUESTION SECTION:
+Google.com                 IN  MX
+
+ANSWER SECTION:
+Google.com.            600 IN  MX 20
+
+;; Query Time:  163  ms
+;; Root Server:  198.41.0.4
+;; MSG SIZE recv:  192
+;; When:  Sun Feb 18 13:31:00 2018
+
+
+neha:Ojha-Neha-Hw1$ ./mydig Google.com NS
+QUESTION SECTION:
+Google.com                 IN  NS
+
+ANSWER SECTION:
+Google.com.          345600 IN  NS ns1.Google.com.
+
+;; Query Time:  164  ms
+;; Root Server:  198.41.0.4
+;; MSG SIZE recv:  192
+;; When:  Sun Feb 18 13:32:02 2018
+
+
